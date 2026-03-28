@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:15
+    # Host 5433 avoids conflict when a local Postgres already uses 5432.
+    ports: ["5433:5432"]
+    environment:
+      POSTGRES_DB: referraldb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+
+  redis:
+    image: redis:7
+    ports: ["6380:6379"]
+
+  api:
+    build: ./backend
+    ports: ["8000:8000"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/referraldb
+      REDIS_URL: redis://redis:6379
+    depends_on: [postgres, redis]
+
+  frontend:
+    build: ./frontend
+    ports: ["3000:3000"]
+    depends_on: [api]
