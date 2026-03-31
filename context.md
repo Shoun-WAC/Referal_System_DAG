@@ -16,6 +16,33 @@ Every referral claim must be validated with real-time cycle detection before com
 
 ---
 
+## Current Implementation Status
+
+Implemented APIs:
+- `POST /users`
+- `GET /users`
+- `GET /users/{id}`
+- `PATCH /users/{id}`
+- `DELETE /users/{id}`
+- `POST /referral/claim`
+- `GET /user/{id}/graph`
+- `GET /user/{id}/rewards`
+- `GET /fraud/flags`
+- `GET /dashboard/metrics`
+- `GET /referral/feed`
+
+Frontend integration status:
+- Listing API was already integrated before this update.
+- User CRUD is now integrated in the frontend through `frontend/src/components/OperationsPanel.jsx`.
+- The operations panel now exposes create, read, update, delete, referral claim, rewards lookup, and refresh actions.
+
+Implementation notes:
+- `POST /users` and `PATCH /users/{id}` return `409` if the email already exists.
+- `DELETE /users/{id}` returns `409` if the user has linked referral, reward, or fraud records.
+- Redis adjacency cache is rebuilt after user create, update, and delete to keep the graph state consistent.
+
+---
+
 ## Database Schema
 
 ### Table: users
@@ -237,6 +264,36 @@ Response: { "user_id": "uuid", "username": "Alice", "status": "root" }
 Response: [{ "user_id": "uuid", "username": "Alice", "status": "root", "balance": 250.0 }]
 ```
 
+### GET /users/{id}
+```json
+{
+  "user_id": "uuid",
+  "username": "Alice",
+  "email": "alice@example.com",
+  "status": "root",
+  "referrer_id": null,
+  "balance": 250.0,
+  "created_at": "2026-03-30T12:00:00"
+}
+```
+
+### PATCH /users/{id}
+```json
+{
+  "username": "Alice Updated",
+  "email": "alice.updated@example.com",
+  "status": "active"
+}
+```
+
+### DELETE /users/{id}
+```json
+{
+  "status": "deleted",
+  "user_id": "uuid"
+}
+```
+
 ### GET /referral/feed
 ```
 Response: [{ "type": "valid" | "blocked" | "reward", "message": "...", "timestamp": "..." }]
@@ -273,10 +330,21 @@ src/
 │   ├── MetricsPanel.jsx       # calls GET /dashboard/metrics
 │   ├── GraphView.jsx          # calls GET /user/{id}/graph, renders with react-flow
 │   ├── FraudMonitor.jsx       # calls GET /fraud/flags
-│   └── ActivityFeed.jsx       # calls GET /referral/feed, polls every 5s
+│   ├── ActivityFeed.jsx       # calls GET /referral/feed, polls every 5s
+│   └── OperationsPanel.jsx    # user CRUD + referral claim + rewards UI
 └── hooks/
     └── usePolling.js          # setInterval wrapper
 ```
+
+### OperationsPanel.jsx
+- Loads users with `GET /users`
+- Creates users with `POST /users`
+- Reads a selected user with `GET /users/{id}`
+- Updates user fields with `PATCH /users/{id}`
+- Deletes a selected user with `DELETE /users/{id}`
+- Submits referral claims with `POST /referral/claim`
+- Loads rewards with `GET /user/{id}/rewards`
+- Triggers dashboard and graph refresh after mutations
 
 ### GraphView.jsx
 - Library: `import ReactFlow, { Background, Controls } from 'reactflow'`
@@ -389,11 +457,12 @@ referral-engine/
 │   │   │   ├── MetricsPanel.jsx
 │   │   │   ├── GraphView.jsx
 │   │   │   ├── FraudMonitor.jsx
-│   │   │   └── ActivityFeed.jsx
+│   │   │   ├── ActivityFeed.jsx
+│   │   │   └── OperationsPanel.jsx
 │   │   └── hooks/usePolling.js
 │   └── package.json
 ├── docker-compose.yml
-└── CONTEXT.md
+└── context.md
 ```
 
 ---

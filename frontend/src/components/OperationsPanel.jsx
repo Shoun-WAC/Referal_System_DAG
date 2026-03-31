@@ -1,5 +1,39 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
+
+const btnBase = {
+  padding: "0.45rem 0.9rem",
+  borderRadius: 6,
+  border: "none",
+  cursor: "pointer",
+  fontWeight: 600,
+  fontSize: 13,
+};
+
+const panel = {
+  background: "#161b22",
+  borderRadius: 8,
+  padding: "1rem",
+  border: "1px solid #30363d",
+};
+
+const label = { display: "block", fontSize: 12, opacity: 0.85, marginBottom: 4 };
+const input = {
+  width: "100%",
+  padding: "0.45rem 0.5rem",
+  borderRadius: 6,
+  border: "1px solid #30363d",
+  background: "#0d1117",
+  color: "#e6edf3",
+  marginBottom: 10,
+};
+
+const card = {
+  background: "#0d1117",
+  border: "1px solid #30363d",
+  borderRadius: 8,
+  padding: "0.9rem",
+};
 
 export default function OperationsPanel({ refreshKey, onDataChanged }) {
   const [users, setUsers] = useState([]);
@@ -8,113 +42,177 @@ export default function OperationsPanel({ refreshKey, onDataChanged }) {
   const [childId, setChildId] = useState("");
   const [referrerId, setReferrerId] = useState("");
   const [rewardUserId, setRewardUserId] = useState("");
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [editForm, setEditForm] = useState({ username: "", email: "", status: "root" });
   const [rewards, setRewards] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState("");
   const [msg, setMsg] = useState(null);
-
-  const loadUsers = () =>
-    api.get("/users").then((r) => {
-      setUsers(r.data);
-      const ids = r.data.map((u) => u.user_id);
-      setChildId((c) => (c && ids.includes(c) ? c : ids[0] || ""));
-      setReferrerId((ref) => (ref && ids.includes(ref) ? ref : ids[0] || ""));
-      setRewardUserId((x) => (x && ids.includes(x) ? x : ids[0] || ""));
-    });
-
-  useEffect(() => {
-    loadUsers().catch((e) => setMsg({ type: "err", text: e.message }));
-  }, [refreshKey]);
+  const flashTimerRef = useRef(0);
 
   const flash = (type, text) => {
     setMsg({ type, text });
-    setTimeout(() => setMsg(null), 8000);
+    window.clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = window.setTimeout(() => setMsg(null), 8000);
+  };
+
+  const loadUsers = async (preferredId) => {
+    const { data } = await api.get("/users");
+    setUsers(data);
+    const ids = data.map((u) => u.user_id);
+    const fallbackId = preferredId && ids.includes(preferredId) ? preferredId : ids[0] || "";
+    setChildId((current) => (current && ids.includes(current) ? current : fallbackId));
+    setReferrerId((current) => (current && ids.includes(current) ? current : fallbackId));
+    setRewardUserId((current) => (current && ids.includes(current) ? current : fallbackId));
+    setSelectedUserId((current) => (current && ids.includes(current) ? current : fallbackId));
+    return { data, fallbackId };
+  };
+
+  const loadSelectedUser = async (userId) => {
+    if (!userId) {
+      setSelectedUser(null);
+      setEditForm({ username: "", email: "", status: "root" });
+      return;
+    }
+    const { data } = await api.get(`/users/${userId}`);
+    setSelectedUser(data);
+    setEditForm({
+      username: data.username || "",
+      email: data.email || "",
+      status: data.status || "root",
+    });
+  };
+
+  useEffect(() => {
+    loadUsers()
+      .then(({ fallbackId }) => loadSelectedUser(fallbackId))
+      .catch((e) => flash("err", e.message));
+  }, [refreshKey]);
+
+  useEffect(() => {
+    loadSelectedUser(selectedUserId).catch((e) => {
+      setSelectedUser(null);
+      flash("err", e.response?.data?.detail || e.message);
+    });
+  }, [selectedUserId]);
+
+  const runAction = async (action, fn) => {
+    setBusyAction(action);
+    try {
+      await fn();
+    } finally {
+      setBusyAction("");
+    }
   };
 
   const handleCreateUser = async (e) => {
     e.preventDefault();
     if (!username.trim() || !email.trim()) return;
-    setBusy(true);
-    try {
+
+    await runAction("create", async () => {
       const { data } = await api.post("/users", { username: username.trim(), email: email.trim() });
       flash("ok", `User created: ${data.username} (${data.user_id})`);
       setUsername("");
       setEmail("");
-      await loadUsers();
+      await loadUsers(data.user_id);
+      await loadSelectedUser(data.user_id);
       onDataChanged?.();
-    } catch (err) {
-      const t = err.response?.data?.detail || err.response?.data || err.message;
-      flash("err", typeof t === "string" ? t : JSON.stringify(t));
-    } finally {
-      setBusy(false);
-    }
+    }).catch((err) => {
+      const detail = err.response?.data?.detail || err.response?.data || err.message;
+      flash("err", typeof detail === "string" ? detail : JSON.stringify(detail));
+    });
   };
 
   const handleClaim = async (e) => {
     e.preventDefault();
     if (!childId || !referrerId) return;
-    setBusy(true);
-    try {
+
+    await runAction("claim", async () => {
       const { data } = await api.post("/referral/claim", {
         new_user_id: childId,
         referrer_id: referrerId,
       });
       flash("ok", data?.status === "committed" ? "Referral committed." : JSON.stringify(data));
+      await loadUsers(childId);
+      await loadSelectedUser(selectedUserId || childId);
       onDataChanged?.();
-      await loadUsers();
-    } catch (err) {
-      const d = err.response?.data;
-      const text = d?.error
-        ? `${d.error}${d.action ? ` (${d.action})` : ""}`
+    }).catch((err) => {
+      const data = err.response?.data;
+      const text = data?.error
+        ? `${data.error}${data.action ? ` (${data.action})` : ""}`
         : err.response?.data?.detail || err.message;
       flash("err", String(text));
+      loadUsers(selectedUserId).catch(() => {});
+      loadSelectedUser(selectedUserId).catch(() => {});
       onDataChanged?.();
-      await loadUsers();
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const handleRewards = async (e) => {
     e.preventDefault();
     if (!rewardUserId) return;
-    setBusy(true);
-    try {
+
+    await runAction("rewards", async () => {
       const { data } = await api.get(`/user/${rewardUserId}/rewards`);
       setRewards(data);
       flash("ok", "Rewards loaded.");
-    } catch (err) {
+    }).catch((err) => {
       flash("err", err.response?.data?.detail || err.message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const btn = {
-    padding: "0.45rem 0.9rem",
-    borderRadius: 6,
-    border: "none",
-    cursor: busy ? "wait" : "pointer",
-    fontWeight: 600,
-    fontSize: 13,
-    opacity: busy ? 0.65 : 1,
+  const handleLoadUser = async (e) => {
+    e.preventDefault();
+    if (!selectedUserId) return;
+
+    await runAction("read", async () => {
+      await loadSelectedUser(selectedUserId);
+      flash("ok", "User details loaded.");
+    }).catch((err) => {
+      flash("err", err.response?.data?.detail || err.message);
+    });
   };
 
-  const panel = {
-    background: "#161b22",
-    borderRadius: 8,
-    padding: "1rem",
-    border: "1px solid #30363d",
+  const handleUpdateUser = async (e) => {
+    e.preventDefault();
+    if (!selectedUserId) return;
+
+    await runAction("update", async () => {
+      const payload = {
+        username: editForm.username.trim(),
+        email: editForm.email.trim(),
+        status: editForm.status,
+      };
+      const { data } = await api.patch(`/users/${selectedUserId}`, payload);
+      setSelectedUser(data);
+      setEditForm({
+        username: data.username,
+        email: data.email,
+        status: data.status,
+      });
+      flash("ok", "User updated.");
+      await loadUsers(selectedUserId);
+      onDataChanged?.();
+    }).catch((err) => {
+      flash("err", err.response?.data?.detail || err.message);
+    });
   };
 
-  const label = { display: "block", fontSize: 12, opacity: 0.85, marginBottom: 4 };
-  const input = {
-    width: "100%",
-    padding: "0.45rem 0.5rem",
-    borderRadius: 6,
-    border: "1px solid #30363d",
-    background: "#0d1117",
-    color: "#e6edf3",
-    marginBottom: 10,
+  const handleDeleteUser = async () => {
+    if (!selectedUserId) return;
+    const confirmed = window.confirm("Delete this user? This only succeeds if the user has no related referral, reward, or fraud history.");
+    if (!confirmed) return;
+
+    await runAction("delete", async () => {
+      await api.delete(`/users/${selectedUserId}`);
+      flash("ok", "User deleted.");
+      setRewards(null);
+      const { fallbackId } = await loadUsers();
+      await loadSelectedUser(fallbackId);
+      onDataChanged?.();
+    }).catch((err) => {
+      flash("err", err.response?.data?.detail || err.message);
+    });
   };
 
   return (
@@ -136,25 +234,107 @@ export default function OperationsPanel({ refreshKey, onDataChanged }) {
         </div>
       )}
 
-      <div style={{ display: "grid", gap: "1.25rem", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
-        <form onSubmit={handleCreateUser}>
+      <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+        <form onSubmit={handleCreateUser} style={card}>
           <h3 style={{ margin: "0 0 0.5rem", fontSize: 14, opacity: 0.9 }}>Create user</h3>
           <label style={label}>Username</label>
           <input style={input} value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Alice" />
           <label style={label}>Email</label>
           <input style={input} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="alice@x.com" type="email" />
-          <button type="submit" disabled={busy} style={{ ...btn, background: "#378ADD", color: "#fff" }}>
+          <button
+            type="submit"
+            disabled={Boolean(busyAction)}
+            style={{ ...btnBase, background: "#378ADD", color: "#fff", opacity: busyAction ? 0.65 : 1 }}
+          >
             POST /users
           </button>
         </form>
 
-        <form onSubmit={handleClaim}>
+        <form onSubmit={handleLoadUser} style={card}>
+          <h3 style={{ margin: "0 0 0.5rem", fontSize: 14, opacity: 0.9 }}>Read user</h3>
+          <label style={label}>Selected user</label>
+          <select style={input} value={selectedUserId} onChange={(e) => setSelectedUserId(e.target.value)}>
+            {users.map((u) => (
+              <option key={u.user_id} value={u.user_id}>
+                {u.username} - {u.user_id.slice(0, 8)}...
+              </option>
+            ))}
+          </select>
+          <button
+            type="submit"
+            disabled={!selectedUserId || Boolean(busyAction)}
+            style={{ ...btnBase, background: "#6b7280", color: "#fff", opacity: busyAction ? 0.65 : 1 }}
+          >
+            GET /users/:id
+          </button>
+          {selectedUser && (
+            <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>
+              <div><strong>Email:</strong> {selectedUser.email}</div>
+              <div><strong>Status:</strong> {selectedUser.status}</div>
+              <div><strong>Balance:</strong> ${Number(selectedUser.balance || 0).toFixed(2)}</div>
+              <div><strong>Referrer:</strong> {selectedUser.referrer_id || "None"}</div>
+            </div>
+          )}
+        </form>
+
+        <form onSubmit={handleUpdateUser} style={card}>
+          <h3 style={{ margin: "0 0 0.5rem", fontSize: 14, opacity: 0.9 }}>Update user</h3>
+          <label style={label}>Username</label>
+          <input
+            style={input}
+            value={editForm.username}
+            onChange={(e) => setEditForm((current) => ({ ...current, username: e.target.value }))}
+            placeholder="Updated username"
+          />
+          <label style={label}>Email</label>
+          <input
+            style={input}
+            value={editForm.email}
+            onChange={(e) => setEditForm((current) => ({ ...current, email: e.target.value }))}
+            placeholder="updated@example.com"
+            type="email"
+          />
+          <label style={label}>Status</label>
+          <select
+            style={input}
+            value={editForm.status}
+            onChange={(e) => setEditForm((current) => ({ ...current, status: e.target.value }))}
+          >
+            <option value="root">root</option>
+            <option value="active">active</option>
+            <option value="flagged">flagged</option>
+          </select>
+          <button
+            type="submit"
+            disabled={!selectedUserId || Boolean(busyAction)}
+            style={{ ...btnBase, background: "#1D9E75", color: "#fff", opacity: busyAction ? 0.65 : 1 }}
+          >
+            PATCH /users/:id
+          </button>
+        </form>
+
+        <div style={card}>
+          <h3 style={{ margin: "0 0 0.5rem", fontSize: 14, opacity: 0.9 }}>Delete user</h3>
+          <p style={{ margin: "0 0 0.75rem", fontSize: 12, opacity: 0.8 }}>
+            Deletes only users with no referral, reward, or fraud references.
+          </p>
+          <button
+            type="button"
+            disabled={!selectedUserId || Boolean(busyAction)}
+            onClick={handleDeleteUser}
+            style={{ ...btnBase, background: "#c94c4c", color: "#fff", opacity: busyAction ? 0.65 : 1 }}
+          >
+            DELETE /users/:id
+          </button>
+        </div>
+
+        <form onSubmit={handleClaim} style={card}>
           <h3 style={{ margin: "0 0 0.5rem", fontSize: 14, opacity: 0.9 }}>Claim referral</h3>
           <label style={label}>New user (child)</label>
           <select style={input} value={childId} onChange={(e) => setChildId(e.target.value)}>
             {users.map((u) => (
               <option key={u.user_id} value={u.user_id}>
-                {u.username} — {u.user_id.slice(0, 8)}…
+                {u.username} - {u.user_id.slice(0, 8)}...
               </option>
             ))}
           </select>
@@ -162,16 +342,20 @@ export default function OperationsPanel({ refreshKey, onDataChanged }) {
           <select style={input} value={referrerId} onChange={(e) => setReferrerId(e.target.value)}>
             {users.map((u) => (
               <option key={u.user_id} value={u.user_id}>
-                {u.username} — {u.user_id.slice(0, 8)}…
+                {u.username} - {u.user_id.slice(0, 8)}...
               </option>
             ))}
           </select>
-          <button type="submit" disabled={busy} style={{ ...btn, background: "#1D9E75", color: "#fff" }}>
+          <button
+            type="submit"
+            disabled={Boolean(busyAction)}
+            style={{ ...btnBase, background: "#8b5cf6", color: "#fff", opacity: busyAction ? 0.65 : 1 }}
+          >
             POST /referral/claim
           </button>
         </form>
 
-        <form onSubmit={handleRewards}>
+        <form onSubmit={handleRewards} style={card}>
           <h3 style={{ margin: "0 0 0.5rem", fontSize: 14, opacity: 0.9 }}>User rewards</h3>
           <label style={label}>User</label>
           <select style={input} value={rewardUserId} onChange={(e) => setRewardUserId(e.target.value)}>
@@ -181,8 +365,12 @@ export default function OperationsPanel({ refreshKey, onDataChanged }) {
               </option>
             ))}
           </select>
-          <button type="submit" disabled={busy} style={{ ...btn, background: "#BA7517", color: "#fff" }}>
-            GET /user/…/rewards
+          <button
+            type="submit"
+            disabled={Boolean(busyAction)}
+            style={{ ...btnBase, background: "#BA7517", color: "#fff", opacity: busyAction ? 0.65 : 1 }}
+          >
+            GET /user/.../rewards
           </button>
           {rewards && (
             <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
@@ -190,7 +378,7 @@ export default function OperationsPanel({ refreshKey, onDataChanged }) {
               <ul style={{ margin: "6px 0 0", paddingLeft: 18, maxHeight: 120, overflow: "auto" }}>
                 {(rewards.transactions || []).slice(0, 8).map((t, i) => (
                   <li key={i}>
-                    L{t.level} +${t.amount} from {String(t.from).slice(0, 8)}…
+                    L{t.level} +${t.amount} from {String(t.from).slice(0, 8)}...
                   </li>
                 ))}
               </ul>
@@ -202,11 +390,11 @@ export default function OperationsPanel({ refreshKey, onDataChanged }) {
       <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #30363d" }}>
         <button
           type="button"
-          disabled={busy}
+          disabled={Boolean(busyAction)}
           onClick={() => onDataChanged?.()}
-          style={{ ...btn, background: "#30363d", color: "#e6edf3" }}
+          style={{ ...btnBase, background: "#30363d", color: "#e6edf3", opacity: busyAction ? 0.65 : 1 }}
         >
-          Refresh dashboard &amp; lists
+          Refresh dashboard and lists
         </button>
       </div>
     </section>
