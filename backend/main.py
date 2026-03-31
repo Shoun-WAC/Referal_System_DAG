@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import SessionLocal, engine, get_db, Base
@@ -24,7 +25,9 @@ from schemas import (
     GraphOut,
     UserCreate,
     UserCreateOut,
+    UserDetailOut,
     UserOut,
+    UserUpdate,
 )
 
 VELOCITY_LIMIT = int(os.getenv("VELOCITY_LIMIT", "5"))
@@ -247,7 +250,11 @@ async def dashboard(db: AsyncSession = Depends(get_db)):
 async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db)):
     u = User(username=body.username, email=body.email, status="root", referrer_id=None)
     db.add(u)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "email already exists")
     await db.refresh(u)
     r = await get_redis()
     try:
@@ -269,6 +276,107 @@ async def list_users(db: AsyncSession = Depends(get_db)):
         )
         for u in rows
     ]
+
+
+@app.get("/users/{uid}", response_model=UserDetailOut)
+async def get_user(uid: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    user = await db.get(User, uid)
+    if not user:
+        raise HTTPException(404, "user not found")
+    return UserDetailOut(
+        user_id=user.user_id,
+        username=user.username,
+        email=user.email,
+        status=user.status,
+        referrer_id=user.referrer_id,
+        balance=float(user.reward_balance or 0),
+        created_at=user.created_at,
+    )
+
+
+@app.patch("/users/{uid}", response_model=UserDetailOut)
+async def update_user(uid: uuid.UUID, body: UserUpdate, db: AsyncSession = Depends(get_db)):
+    user = await db.get(User, uid)
+    if not user:
+        raise HTTPException(404, "user not found")
+
+    data = body.model_dump(exclude_unset=True)
+    if "status" in data and data["status"] not in {"active", "flagged", "root"}:
+        raise HTTPException(400, "invalid status")
+
+    if "username" in data:
+        user.username = data["username"]
+    if "email" in data:
+        user.email = data["email"]
+    if "status" in data:
+        user.status = data["status"]
+        if data["status"] == "root":
+            user.referrer_id = None
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "email already exists")
+    await db.refresh(user)
+
+    r = await get_redis()
+    try:
+        await rebuild_from_db(db, r)
+    finally:
+        await r.aclose()
+
+    return UserDetailOut(
+        user_id=user.user_id,
+        username=user.username,
+        email=user.email,
+        status=user.status,
+        referrer_id=user.referrer_id,
+        balance=float(user.reward_balance or 0),
+        created_at=user.created_at,
+    )
+
+
+@app.delete("/users/{uid}")
+async def delete_user(uid: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    user = await db.get(User, uid)
+    if not user:
+        raise HTTPException(404, "user not found")
+
+    referral_count = (
+        await db.execute(select(func.count(Referral.id)).where(or_(Referral.child_id == uid, Referral.parent_id == uid)))
+    ).scalar_one()
+    reward_count = (
+        await db.execute(
+            select(func.count(RewardTransaction.id)).where(
+                or_(RewardTransaction.from_user == uid, RewardTransaction.to_user == uid)
+            )
+        )
+    ).scalar_one()
+    fraud_count = (
+        await db.execute(
+            select(func.count(FraudLog.id)).where(
+                or_(FraudLog.attempted_by == uid, FraudLog.attempted_ref == uid)
+            )
+        )
+    ).scalar_one()
+
+    if referral_count or reward_count or fraud_count:
+        raise HTTPException(
+            409,
+            "cannot delete user with referral, reward, or fraud history",
+        )
+
+    await db.delete(user)
+    await db.commit()
+
+    r = await get_redis()
+    try:
+        await rebuild_from_db(db, r)
+    finally:
+        await r.aclose()
+
+    return {"status": "deleted", "user_id": str(uid)}
 
 
 @app.get("/referral/feed", response_model=list[FeedItem])

@@ -1,6 +1,6 @@
 from datetime import datetime
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
 
 class ClaimIn(BaseModel):
@@ -24,6 +24,22 @@ class UserCreateOut(BaseModel):
     user_id: UUID
     username: str
     status: str
+
+
+class UserDetailOut(BaseModel):
+    user_id: UUID
+    username: str
+    email: str
+    status: str
+    referrer_id: UUID | None
+    balance: float
+    created_at: datetime
+
+
+class UserUpdate(BaseModel):
+    username: str | None = None
+    email: str | None = None
+    status: str | None = None
 
 
 class GraphNode(BaseModel):
